@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 import google.generativeai as genai
+from openai import OpenAI
 import os
 import time
 import re
@@ -17,6 +18,57 @@ from reportlab.lib.units import inch
 # --- Hằng số mới ---
 FALLBACK_MODEL = "gemini-2.5-flash-lite"
 API_TIMEOUT_SECONDS = 7 * 60 # 7 phút
+DEFAULT_PROVIDER = "Google"
+MEGALLM_BASE_URL = "https://ai.megallm.io/v1"
+GOOGLE_MODELS = [
+    "gemini-2.0-flash-lite-preview-02-05",
+    "gemini-2.5-pro-preview-05-06",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro-exp-03-25",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash-preview-04-17",
+    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash-lite"
+]
+MEGALLM_MODELS = [
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-4o",
+    "gpt-4.1",
+    "claude-opus-4-1-20250805",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514",
+    "claude-haiku-4-5-20251001",
+    "gemini-2.5-pro",
+    "gemini-3-pro-preview",
+    "glm-4.6",
+    "deepseek-ai/deepseek-v3.1",
+    "deepseek-v3.2",
+    "moonshotai/kimi-k2-thinking"
+]
+PROVIDER_DEFAULT_MODELS = {
+    "Google": "gemini-flash-latest",
+    "MegaLLM": "gpt-5.1"
+}
+PROVIDER_CONFIG = {
+    "Google": {
+        "models": GOOGLE_MODELS,
+        "fallback_model": FALLBACK_MODEL,
+        "base_url": None
+    },
+    "MegaLLM": {
+        "models": MEGALLM_MODELS,
+        "fallback_model": None,
+        "base_url": MEGALLM_BASE_URL
+    }
+}
 # --- Kết thúc hằng số mới ---
 
 class GeminiInterface:
@@ -33,6 +85,7 @@ class GeminiInterface:
         self.should_stop = False
         self.queue = queue.Queue()
         self.api_key = None  # Initialize API key as None
+        self.provider_var = tk.StringVar(value=DEFAULT_PROVIDER)
 
         self.create_menu_export() # Thêm menu Export phía trên cùng
         self.create_main_frame()
@@ -187,22 +240,31 @@ class GeminiInterface:
         main_container = ttk.Frame(self.scrollable_frame, padding="10")
         main_container.pack(fill="both", expand=True)
 
-        # Language selection
-        lang_frame = ttk.LabelFrame(main_container, text="Chọn ngôn ngữ", padding="5")
+        # Language & provider selection
+        lang_frame = ttk.LabelFrame(main_container, text="Chọn ngôn ngữ / Provider", padding="5")
         lang_frame.pack(fill="x", pady=5)
-        self.language = ttk.Combobox(lang_frame, values=["中文", "ENG", "Việt Nam"],
-                                   font=('Arial', 12))
+        lang_provider_frame = ttk.Frame(lang_frame)
+        lang_provider_frame.pack(fill="x")
+        self.language = ttk.Combobox(lang_provider_frame, values=["中文", "ENG", "Việt Nam"],
+                                   font=('Arial', 12), state="readonly")
         self.language.set("中文")
-        self.language.pack(fill="x")
+        self.language.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.language.bind("<<ComboboxSelected>>", self.on_language_change)
+        self.provider_combo = ttk.Combobox(
+            lang_provider_frame,
+            textvariable=self.provider_var,
+            values=list(PROVIDER_CONFIG.keys()),
+            font=('Arial', 12),
+            state="readonly"
+        )
+        self.provider_combo.pack(side="left", fill="x", expand=True)
+        self.provider_combo.bind("<<ComboboxSelected>>", self.on_provider_change)
 
         # Model selection
         model_frame = ttk.LabelFrame(main_container, text="Chọn model chính", padding="5") # Sửa label
         model_frame.pack(fill="x", pady=5)
-        # Cập nhật danh sách model nếu cần
-        models = ["gemini-2.0-flash-lite-preview-02-05", "gemini-2.5-pro-preview-05-06","gemini-2.0-flash", "gemini-2.5-pro-exp-03-25", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-05-20", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-lite", "gemini-2.5-flash-lite"] # Ví dụ cập nhật model
-        self.model = ttk.Combobox(model_frame, values=models, font=('Arial', 12))
-        self.model.set("gemini-2.5-flash") # Đặt model mặc định mới nếu cần
+        self.model = ttk.Combobox(model_frame, values=[], font=('Arial', 12), state="readonly")
+        self.update_model_options(self.provider_var.get())
         self.model.pack(fill="x")
 
         # API Key Frame
@@ -293,6 +355,24 @@ class GeminiInterface:
             self.split_length_label.config(text="Số ký tự mỗi phần:")
         else:
             self.split_length_label.config(text="Số ký tự/số từ mỗi phần:")
+
+    def on_provider_change(self, event):
+        """Refresh model list when provider changes."""
+        self.update_model_options()
+
+    def update_model_options(self, provider=None):
+        """Update model combobox based on selected provider."""
+        provider = provider or self.provider_var.get()
+        config = PROVIDER_CONFIG.get(provider, {})
+        models = config.get("models", [])
+        self.model["values"] = models
+        default_model = PROVIDER_DEFAULT_MODELS.get(provider)
+        if default_model in models:
+            self.model.set(default_model)
+        elif models:
+            self.model.set(models[0])
+        else:
+            self.model.set("")
 
     def setup_periodic_queue_check(self):
         def check_queue():
@@ -402,90 +482,153 @@ class GeminiInterface:
         self.stop_button.configure(state='disabled') # Vô hiệu hóa ngay khi bấm dừng
 
     # --- Hàm gọi API mới ---
-    def _call_gemini_api(self, model_name, prompt_content):
-        """Hàm thực hiện gọi API thực tế."""
+    def _call_model_api(self, provider, model_name, prompt_content, megallm_client=None):
+        """Hàm thực hiện gọi API theo provider được chọn."""
         try:
-            # Mỗi lần gọi có thể cần model object mới nếu có cấu hình khác nhau
-            # Hoặc đảm bảo model object thread-safe nếu dùng chung
-            model_instance = genai.GenerativeModel(model_name)
-            response = model_instance.generate_content(prompt_content)
-            if not response or not response.text:
-                # Đôi khi API trả về response nhưng không có text
-                return None, f"Không nhận được nội dung hợp lệ từ model {model_name}"
-            return response.text, None # Trả về text và không có lỗi
+            if provider == "Google":
+                model_instance = genai.GenerativeModel(model_name)
+                response = model_instance.generate_content(prompt_content)
+                if not response or not response.text:
+                    return None, f"Không nhận được nội dung hợp lệ từ model {model_name}"
+                return response.text, None
+            elif provider == "MegaLLM":
+                if megallm_client is None:
+                    return None, "MegaLLM client chưa được khởi tạo."
+                response = megallm_client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt_content}]
+                )
+                content = self._extract_megallm_content(response)
+                if not content:
+                    return None, f"Không nhận được nội dung hợp lệ từ model {model_name} (MegaLLM)"
+                return content, None
+            else:
+                return None, f"Provider {provider} chưa hỗ trợ."
         except Exception as e:
-            # Bắt tất cả lỗi từ API call
-            error_msg = f"Lỗi API khi gọi model {model_name}: {type(e).__name__} - {str(e)}"
-            print(error_msg) # Log lỗi ra console để debug
-            return None, error_msg # Trả về None và thông báo lỗi
+            error_msg = f"Lỗi API khi gọi provider {provider}, model {model_name}: {type(e).__name__} - {str(e)}"
+            print(error_msg)
+            return None, error_msg
+
+    def _extract_megallm_content(self, response):
+        """Trích nội dung text từ response MegaLLM."""
+        choices = getattr(response, "choices", None)
+        if not choices:
+            return None
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        content = None
+        if message is not None:
+            content = getattr(message, "content", None)
+            if isinstance(content, dict):
+                content = content.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(part.get("text") or part.get("content") or "")
+                else:
+                    parts.append(str(part))
+            content = " ".join(part for part in parts if part).strip()
+        elif isinstance(content, str):
+            content = content.strip()
+        if not content and isinstance(message, dict):
+            content = (message.get("content") or "").strip()
+        if not content:
+            text_attr = getattr(first_choice, "text", None)
+            if isinstance(text_attr, str):
+                content = text_attr.strip()
+        return content
 
     # --- Hàm gọi API với Retry và Timeout ---
-    def call_gemini_with_retry_and_timeout(self, primary_model_name, prompt_content):
+    def call_model_with_retry_and_timeout(self, provider, primary_model_name, prompt_content, megallm_client=None):
         """Gọi API với timeout, retry bằng model fallback nếu cần."""
         start_time = time.time()
         error_message_final = "Không có lỗi"
+        provider_config = PROVIDER_CONFIG.get(provider, {})
+        fallback_model = provider_config.get("fallback_model")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            # --- Lần thử 1: Model chính ---
-            future = executor.submit(self._call_gemini_api, primary_model_name, prompt_content)
+            future = executor.submit(self._call_model_api, provider, primary_model_name, prompt_content, megallm_client)
             try:
-                print(f"Attempting primary model: {primary_model_name}")
+                print(f"Attempting primary model ({provider}): {primary_model_name}")
                 result_text, error_message = future.result(timeout=API_TIMEOUT_SECONDS)
-                if error_message: # Lỗi API trả về từ _call_gemini_api
+                if error_message:
                     print(f"Primary model failed: {error_message}")
                     error_message_final = error_message
-                    # Không return ngay, đi tiếp để retry
-                else: # Thành công
-                    print(f"Primary model success.")
-                    return result_text, None # Thành công, trả về kết quả
-
+                else:
+                    print("Primary model success.")
+                    return result_text, None
             except concurrent.futures.TimeoutError:
                 elapsed = time.time() - start_time
                 print(f"Primary model timeout after {elapsed:.2f}s")
                 error_message_final = f"Model chính ({primary_model_name}) timeout sau {elapsed:.2f} giây."
-                # Không return ngay, đi tiếp để retry
-            except Exception as e: # Các lỗi khác không mong muốn
-                 elapsed = time.time() - start_time
-                 print(f"Primary model unexpected error after {elapsed:.2f}s: {e}")
-                 error_message_final = f"Lỗi không xác định với model chính ({primary_model_name}): {str(e)}"
-                 # Không return ngay, đi tiếp để retry
+            except Exception as e:
+                elapsed = time.time() - start_time
+                print(f"Primary model unexpected error after {elapsed:.2f}s: {e}")
+                error_message_final = f"Lỗi không xác định với model chính ({primary_model_name}): {str(e)}"
 
-        # --- Nếu đến đây, lần thử 1 đã thất bại (lỗi hoặc timeout) ---
-        print(f"Trying fallback model: {FALLBACK_MODEL}")
-        self.queue.put((self.progress_text, f"\n-> Thử lại với model {FALLBACK_MODEL}...", False))
+        if not fallback_model:
+            error_message_final += "\nProvider không có fallback model."
+            return None, error_message_final
+
+        print(f"Trying fallback model: {fallback_model}")
+        self.queue.put((self.progress_text, f"\n-> Thử lại với model {fallback_model}...", False))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-             # --- Lần thử 2: Model fallback ---
             fallback_start_time = time.time()
-            future = executor.submit(self._call_gemini_api, FALLBACK_MODEL, prompt_content)
+            future = executor.submit(self._call_model_api, provider, fallback_model, prompt_content, megallm_client)
             try:
                 result_text, error_message = future.result(timeout=API_TIMEOUT_SECONDS)
-                if error_message: # Lỗi API từ fallback model
+                if error_message:
                     print(f"Fallback model failed: {error_message}")
-                    # Kết hợp lỗi gốc và lỗi fallback
-                    error_message_final += f"\nRetry với {FALLBACK_MODEL} cũng thất bại: {error_message}"
-                    return None, error_message_final # Thất bại hoàn toàn
-                else: # Fallback thành công
-                     elapsed_fallback = time.time() - fallback_start_time
-                     print(f"Fallback model success after {elapsed_fallback:.2f}s.")
-                     self.queue.put((self.progress_text, f"\n-> Retry với {FALLBACK_MODEL} thành công.", False))
-                     return result_text, None # Thành công với fallback
-
+                    error_message_final += f"\nRetry với {fallback_model} cũng thất bại: {error_message}"
+                    return None, error_message_final
+                else:
+                    elapsed_fallback = time.time() - fallback_start_time
+                    print(f"Fallback model success after {elapsed_fallback:.2f}s.")
+                    self.queue.put((self.progress_text, f"\n-> Retry với {fallback_model} thành công.", False))
+                    return result_text, None
             except concurrent.futures.TimeoutError:
                 elapsed = time.time() - fallback_start_time
                 print(f"Fallback model timeout after {elapsed:.2f}s")
-                error_message_final += f"\nRetry với {FALLBACK_MODEL} cũng timeout sau {elapsed:.2f} giây."
-                return None, error_message_final # Thất bại hoàn toàn
+                error_message_final += f"\nRetry với {fallback_model} cũng timeout sau {elapsed:.2f} giây."
+                return None, error_message_final
             except Exception as e:
-                 elapsed = time.time() - fallback_start_time
-                 print(f"Fallback model unexpected error after {elapsed:.2f}s: {e}")
-                 error_message_final += f"\nLỗi không xác định khi retry với {FALLBACK_MODEL}: {str(e)}"
-                 return None, error_message_final # Thất bại hoàn toàn
-
-
+                elapsed = time.time() - fallback_start_time
+                print(f"Fallback model unexpected error after {elapsed:.2f}s: {e}")
+                error_message_final += f"\nLỗi không xác định khi retry với {fallback_model}: {str(e)}"
+                return None, error_message_final
     def _process_request_thread(self):
         try:
-            genai.configure(api_key=self.api_key)
+            provider = self.provider_var.get()
+            provider_config = PROVIDER_CONFIG.get(provider)
+            if not provider_config:
+                self.show_error(f"Provider {provider} chưa được cấu hình.")
+                self.processing = False
+                self.root.after(0, lambda: self.submit_button.configure(state='normal'))
+                self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
+                return
+            megallm_client = None
+            if provider == "Google":
+                genai.configure(api_key=self.api_key)
+            elif provider == "MegaLLM":
+                try:
+                    megallm_client = OpenAI(
+                        base_url=provider_config.get("base_url") or MEGALLM_BASE_URL,
+                        api_key=self.api_key
+                    )
+                except Exception as client_error:
+                    self.show_error(f"Không thể khởi tạo MegaLLM client: {client_error}")
+                    self.processing = False
+                    self.root.after(0, lambda: self.submit_button.configure(state='normal'))
+                    self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
+                    return
+            else:
+                self.show_error(f"Provider {provider} chưa hỗ trợ.")
+                self.processing = False
+                self.root.after(0, lambda: self.submit_button.configure(state='normal'))
+                self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
+                return
             primary_model_name = self.model.get()
             # Không cần tạo model instance ở đây nữa vì hàm gọi API sẽ tạo
 
@@ -530,8 +673,8 @@ class GeminiInterface:
                 full_prompt = f"{prompt}\n\n{chapter}" # Thêm dòng trống để phân tách rõ ràng
 
                 # Gọi hàm mới có retry và timeout
-                response_text, error_msg = self.call_gemini_with_retry_and_timeout(
-                    primary_model_name, full_prompt
+                response_text, error_msg = self.call_model_with_retry_and_timeout(
+                    provider, primary_model_name, full_prompt, megallm_client
                 )
 
                 # Kiểm tra dừng lại lần nữa sau khi gọi API (có thể mất thời gian)
