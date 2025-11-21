@@ -16,10 +16,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
 
 # --- Hằng số mới ---
-FALLBACK_MODEL = "gemini-2.5-flash-lite"
+GOOGLE_FALLBACK_MODEL = "gemini-2.5-flash-lite"
 API_TIMEOUT_SECONDS = 7 * 60 # 7 phút
 DEFAULT_PROVIDER = "Google"
 MEGALLM_BASE_URL = "https://ai.megallm.io/v1"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://localhost",
+    "X-Title": "GeminiLocal"
+}
 GOOGLE_MODELS = [
     "gemini-2.0-flash-lite-preview-02-05",
     "gemini-2.5-pro-preview-05-06",
@@ -53,20 +58,46 @@ MEGALLM_MODELS = [
     "deepseek-v3.2",
     "moonshotai/kimi-k2-thinking"
 ]
+OPENROUTER_MODELS = [
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "deepseek/deepseek-chat-v3.1:free",
+    "tngtech/deepseek-r1t2-chimera:free",
+    "tngtech/deepseek-r1t-chimera:free",
+    "deepseek/deepseek-r1-0528:free",
+    "x-ai/grok-4.1-fast",
+    "x-ai/grok-4.1-fast:free",
+    "alibaba/tongyi-deepresearch-30b-a3b:free",
+    "meituan/longcat-flash-chat:free",
+    "moonshotai/kimi-k2:free",
+    "z-ai/glm-4.5-air:free",
+    "qwen/qwen2.5-vl-72b-instruct:free",
+    "qwen/qwen3-30b-a3b:free",
+    "qwen/qwen3-235b-a22b:free",
+    "google/gemini-2.0-flash-exp:free",
+    "meta-llama/llama-3.3-70b-instruct:free"
+]
 PROVIDER_DEFAULT_MODELS = {
     "Google": "gemini-flash-latest",
-    "MegaLLM": "gpt-5.1"
+    "MegaLLM": "gpt-5.1",
+    "Open Router": "deepseek/deepseek-chat-v3.1:free"
 }
 PROVIDER_CONFIG = {
     "Google": {
         "models": GOOGLE_MODELS,
-        "fallback_model": FALLBACK_MODEL,
+        "fallback_model": GOOGLE_FALLBACK_MODEL,
         "base_url": None
     },
     "MegaLLM": {
         "models": MEGALLM_MODELS,
         "fallback_model": None,
         "base_url": MEGALLM_BASE_URL
+    },
+    "Open Router": {
+        "models": OPENROUTER_MODELS,
+        "fallback_model": "tngtech/deepseek-r1t2-chimera:free",
+        "base_url": OPENROUTER_BASE_URL,
+        "headers": OPENROUTER_HEADERS
     }
 }
 # --- Kết thúc hằng số mới ---
@@ -482,7 +513,7 @@ class GeminiInterface:
         self.stop_button.configure(state='disabled') # Vô hiệu hóa ngay khi bấm dừng
 
     # --- Hàm gọi API mới ---
-    def _call_model_api(self, provider, model_name, prompt_content, megallm_client=None):
+    def _call_model_api(self, provider, model_name, prompt_content, openai_client=None):
         """Hàm thực hiện gọi API theo provider được chọn."""
         try:
             if provider == "Google":
@@ -491,16 +522,16 @@ class GeminiInterface:
                 if not response or not response.text:
                     return None, f"Không nhận được nội dung hợp lệ từ model {model_name}"
                 return response.text, None
-            elif provider == "MegaLLM":
-                if megallm_client is None:
-                    return None, "MegaLLM client chưa được khởi tạo."
-                response = megallm_client.chat.completions.create(
+            elif provider in ["MegaLLM", "Open Router"]:
+                if openai_client is None:
+                    return None, f"{provider} client chưa được khởi tạo."
+                response = openai_client.chat.completions.create(
                     model=model_name,
                     messages=[{"role": "user", "content": prompt_content}]
                 )
                 content = self._extract_megallm_content(response)
                 if not content:
-                    return None, f"Không nhận được nội dung hợp lệ từ model {model_name} (MegaLLM)"
+                    return None, f"Không nhận được nội dung hợp lệ từ model {model_name} ({provider})"
                 return content, None
             else:
                 return None, f"Provider {provider} chưa hỗ trợ."
@@ -510,7 +541,7 @@ class GeminiInterface:
             return None, error_msg
 
     def _extract_megallm_content(self, response):
-        """Trích nội dung text từ response MegaLLM."""
+        """Trích nội dung text từ response theo định dạng OpenAI-compatible."""
         choices = getattr(response, "choices", None)
         if not choices:
             return None
@@ -540,7 +571,7 @@ class GeminiInterface:
         return content
 
     # --- Hàm gọi API với Retry và Timeout ---
-    def call_model_with_retry_and_timeout(self, provider, primary_model_name, prompt_content, megallm_client=None):
+    def call_model_with_retry_and_timeout(self, provider, primary_model_name, prompt_content, openai_client=None):
         """Gọi API với timeout, retry bằng model fallback nếu cần."""
         start_time = time.time()
         error_message_final = "Không có lỗi"
@@ -548,7 +579,7 @@ class GeminiInterface:
         fallback_model = provider_config.get("fallback_model")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self._call_model_api, provider, primary_model_name, prompt_content, megallm_client)
+            future = executor.submit(self._call_model_api, provider, primary_model_name, prompt_content, openai_client)
             try:
                 print(f"Attempting primary model ({provider}): {primary_model_name}")
                 result_text, error_message = future.result(timeout=API_TIMEOUT_SECONDS)
@@ -576,7 +607,7 @@ class GeminiInterface:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             fallback_start_time = time.time()
-            future = executor.submit(self._call_model_api, provider, fallback_model, prompt_content, megallm_client)
+            future = executor.submit(self._call_model_api, provider, fallback_model, prompt_content, openai_client)
             try:
                 result_text, error_message = future.result(timeout=API_TIMEOUT_SECONDS)
                 if error_message:
@@ -608,17 +639,22 @@ class GeminiInterface:
                 self.root.after(0, lambda: self.submit_button.configure(state='normal'))
                 self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
                 return
-            megallm_client = None
+            openai_client = None
             if provider == "Google":
                 genai.configure(api_key=self.api_key)
-            elif provider == "MegaLLM":
+            elif provider in ["MegaLLM", "Open Router"]:
                 try:
-                    megallm_client = OpenAI(
-                        base_url=provider_config.get("base_url") or MEGALLM_BASE_URL,
-                        api_key=self.api_key
+                    base_url = provider_config.get("base_url")
+                    if not base_url and provider == "MegaLLM":
+                        base_url = MEGALLM_BASE_URL
+                    default_headers = provider_config.get("headers")
+                    openai_client = OpenAI(
+                        base_url=base_url,
+                        api_key=self.api_key,
+                        default_headers=default_headers
                     )
                 except Exception as client_error:
-                    self.show_error(f"Không thể khởi tạo MegaLLM client: {client_error}")
+                    self.show_error(f"Không thể khởi tạo {provider} client: {client_error}")
                     self.processing = False
                     self.root.after(0, lambda: self.submit_button.configure(state='normal'))
                     self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
@@ -674,7 +710,7 @@ class GeminiInterface:
 
                 # Gọi hàm mới có retry và timeout
                 response_text, error_msg = self.call_model_with_retry_and_timeout(
-                    provider, primary_model_name, full_prompt, megallm_client
+                    provider, primary_model_name, full_prompt, openai_client
                 )
 
                 # Kiểm tra dừng lại lần nữa sau khi gọi API (có thể mất thời gian)
