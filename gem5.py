@@ -334,10 +334,18 @@ class GeminiInterface:
                                           mode="determinate")
         self.progress_bar.pack(fill="x", pady=5)
 
-        # Prompt input
-        prompt_frame = ttk.LabelFrame(main_container, text="Nhập prompt", padding="5")
-        prompt_frame.pack(fill="x", pady=5)
+        # Prompt input + context input
+        prompt_context_frame = ttk.Frame(main_container)
+        prompt_context_frame.pack(fill="x", pady=5)
+
+        prompt_frame = ttk.LabelFrame(prompt_context_frame, text="Nhập prompt", padding="5")
+        prompt_frame.pack(side="left", fill="both", expand=True)
         self.prompt_text = self.create_text_widget(prompt_frame, height=4)
+
+        context_frame = ttk.LabelFrame(prompt_context_frame, text="Bối cảnh chương trước (tóm tắt)", padding="5")
+        context_frame.pack(side="left", fill="both", expand=True, padx=5)
+        self.prev_summary_text = self.create_text_widget(context_frame, height=4)
+        self.prev_summary_text.insert("1.0", "")
 
         # Additional text input
         additional_frame = ttk.LabelFrame(main_container,
@@ -376,6 +384,26 @@ class GeminiInterface:
                                         padding="5")
         completion_frame.pack(fill="x", pady=5)
         self.completion_text = self.create_text_widget(completion_frame, height=4) # Tăng chiều cao
+    def build_translation_prompt(self, chapter_text, prev_summary):
+        prompt = self.prompt_text.get("1.0", tk.END).strip()
+        context = prev_summary.strip()
+        prompt_parts = [prompt]
+        if context:
+            prompt_parts.append(f"\nBối cảnh chương trước: {context}")
+        prompt_parts.append("\nNội dung cần dịch:\n" + chapter_text)
+        prompt_parts.append("\nYêu cầu:\n1. Trả về bản dịch tiếng Việt của chương trên, không dùng Markdown.\n2. Trả về tóm tắt nội dung chương vừa dịch, tối đa 100 từ, không dùng Markdown.\nTrả kết quả theo đúng thứ tự:\n---DỊCH---\n[Bản dịch]\n---TÓM TẮT---\n[Tóm tắt chương]")
+        return "\n".join(prompt_parts)
+
+    def extract_translation_and_summary(self, response_text):
+        import re
+        parts = re.split(r'---DỊCH---|---TÓM TẮT---', response_text)
+        if len(parts) >= 3:
+            translation = parts[1].strip()
+            summary = parts[2].strip()
+        else:
+            translation = response_text.strip()
+            summary = ""
+        return translation, summary
 
     def on_language_change(self, event):
         """Update label when language changes."""
@@ -630,6 +658,7 @@ class GeminiInterface:
                 error_message_final += f"\nLỗi không xác định khi retry với {fallback_model}: {str(e)}"
                 return None, error_message_final
     def _process_request_thread(self):
+        import traceback
         try:
             provider = self.provider_var.get()
             provider_config = PROVIDER_CONFIG.get(provider)
@@ -666,32 +695,32 @@ class GeminiInterface:
                 self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
                 return
             primary_model_name = self.model.get()
-            # Không cần tạo model instance ở đây nữa vì hàm gọi API sẽ tạo
 
-            prompt = self.prompt_text.get("1.0", tk.END).strip()
             text = self.additional_text.get("1.0", tk.END).strip()
-
-            chapters = self.split_text(text)
+            split_method = self.split_method.get()
+            split_length = self.split_length_entry.get()
+            if split_method == "Theo chương (第X章/Chương X)":
+                chapters = self.split_text(text)
+            else:
+                chapters = self.smart_split_by_words(text, int(split_length))
             if not chapters:
                 self.show_error("Không thể chia văn bản thành các phần.")
-                self.processing = False # Đặt lại trạng thái
+                self.processing = False
                 self.root.after(0, lambda: self.submit_button.configure(state='normal'))
                 self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
                 return
 
-            results_dir = os.path.join(os.path.expanduser("~"), "Downloads",
-                                     "gemini_results")
+            results_dir = os.path.join(os.path.expanduser("~"), "Downloads", "gemini_results")
             os.makedirs(results_dir, exist_ok=True)
-
             timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-            result_file = os.path.join(results_dir,
-                                     f"gemini_result_{timestamp}_{primary_model_name.replace('/','-')}.txt") # Thay / để tránh lỗi path
+            result_file = os.path.join(results_dir, f"gemini_result_{timestamp}_{primary_model_name.replace('/', '-')}.txt")
 
             self.progress_bar["maximum"] = len(chapters)
             self.progress_bar["value"] = 0
 
-            status_messages = [] # List để lưu trạng thái từng phần
+            status_messages = []
             total_parts = len(chapters)
+            prev_summary = self.prev_summary_text.get("1.0", tk.END).strip()
 
             for i, chapter in enumerate(chapters, 1):
                 if self.should_stop:
@@ -700,100 +729,83 @@ class GeminiInterface:
                                     f"Xử lý đã bị dừng ở phần {i}.\n" + "\n".join(status_messages) + f"\nKết quả chưa hoàn chỉnh lưu tại: {result_file}", True))
                     break
 
+                # Xây dựng prompt cho từng chương
+                prompt_content = self.build_translation_prompt(chapter, prev_summary)
+
+                # Hiển thị full prompt gửi API để debug
                 self.queue.put((self.progress_text,
-                              f"Đang xử lý phần {i}/{total_parts}\n"
-                              f"Model chính: {primary_model_name}\n"
-                              f"Nội dung đầu: {chapter[:100]}...", True))
+                    f"Đang xử lý phần {i}/{total_parts}\n"
+                    f"Model chính: {primary_model_name}\n"
+                    f"Prompt gửi API:\n{'='*20}\n{prompt_content}\n{'='*20}", True))
                 self.queue.put((self.result_text, f"--- Đang chờ kết quả phần {i} ---", True))
 
-                full_prompt = f"{prompt}\n\n{chapter}" # Thêm dòng trống để phân tách rõ ràng
-
-                # Gọi hàm mới có retry và timeout
                 response_text, error_msg = self.call_model_with_retry_and_timeout(
-                    provider, primary_model_name, full_prompt, openai_client
+                    provider, primary_model_name, prompt_content, openai_client
                 )
 
-                # Kiểm tra dừng lại lần nữa sau khi gọi API (có thể mất thời gian)
                 if self.should_stop:
-                     status_messages.append(f"Phần {i}/{total_parts}: Đã dừng bởi người dùng sau khi gọi API.")
-                     self.queue.put((self.completion_text,
+                    status_messages.append(f"Phần {i}/{total_parts}: Đã dừng bởi người dùng sau khi gọi API.")
+                    self.queue.put((self.completion_text,
                                     f"Xử lý đã bị dừng ở phần {i}.\n" + "\n".join(status_messages) + f"\nKết quả chưa hoàn chỉnh lưu tại: {result_file}", True))
-                     break
+                    break
 
                 if error_msg:
-                    # Xử lý lỗi sau khi đã retry
                     error_log = f"LỖI PHẦN {i}: {error_msg}"
-                    print(error_log) # Log lỗi ra console
-                    self.queue.put((self.result_text, error_log, True)) # Hiển thị lỗi ở ô kết quả hiện tại
-                    status_messages.append(f"Phần {i}/{total_parts}: Thất bại - {error_msg.splitlines()[0]}") # Chỉ lấy dòng đầu của lỗi cho status
-
-                    # Ghi lỗi vào file kết quả
+                    print(error_log)
+                    self.queue.put((self.result_text, error_log, True))
+                    status_messages.append(f"Phần {i}/{total_parts}: Thất bại - {error_msg.splitlines()[0]}")
                     try:
                         with open(result_file, 'a', encoding='utf-8') as f:
                             f.write(f"## LỖI PHẦN {i} ##\n")
                             f.write(f"{error_msg}\n\n")
                     except Exception as write_err:
                         print(f"Không thể ghi lỗi vào file: {write_err}")
-                        status_messages[-1] += " (Không ghi được file)" # Cập nhật status
-
-                    # Cập nhật thanh tiến trình và trạng thái tổng thể
+                        status_messages[-1] += " (Không ghi được file)"
                     self.progress_bar["value"] = i
                     self.queue.put((self.completion_text, "\n".join(status_messages) + f"\nKết quả đang lưu tại: {result_file}", True))
+                    continue
 
-                    # Quan trọng: Tiếp tục vòng lặp để xử lý phần tiếp theo
-                    continue # Bỏ qua phần bị lỗi, làm phần tiếp theo
+                # Tách bản dịch và tóm tắt
+                translation, summary = self.extract_translation_and_summary(response_text)
+                self.queue.put((self.result_text, f"Kết quả xử lý phần {i}:\n{translation}\n\n---TÓM TẮT---\n{summary}", True))
+                status_messages.append(f"Phần {i}/{total_parts}: Hoàn thành.")
+                # Ghi kết quả vào file
+                try:
+                    with open(result_file, 'a', encoding='utf-8') as f:
+                        f.write(f"## PHẦN {i} ##\n")
+                        f.write(translation + "\n\n")
+                        f.write(f"## TÓM TẮT PHẦN {i} ##\n")
+                        f.write(summary + "\n\n")
+                except Exception as write_err:
+                    print(f"Không thể ghi kết quả phần {i} vào file: {write_err}")
+                    status_messages[-1] = f"Phần {i}/{total_parts}: Hoàn thành (Lỗi ghi file)"
+                self.progress_bar["value"] = i
+                self.queue.put((self.completion_text, "\n".join(status_messages) + f"\nKết quả đang lưu tại: {result_file}", True))
+                # Cập nhật tóm tắt cho chương sau
+                prev_summary = summary
+                self.prev_summary_text.delete("1.0", tk.END)
+                self.prev_summary_text.insert("1.0", summary)
 
-                else:
-                    # Xử lý thành công
-                    self.queue.put((self.result_text,
-                                  f"Kết quả xử lý phần {i}:\n{response_text}", True))
-                    status_messages.append(f"Phần {i}/{total_parts}: Hoàn thành.")
-
-                    # Ghi kết quả vào file
-                    try:
-                        with open(result_file, 'a', encoding='utf-8') as f:
-                            f.write(f"## ") # Thêm đánh dấu đầu mỗi chương
-                            f.write(response_text + "\n\n")
-                    except Exception as write_err:
-                         print(f"Không thể ghi kết quả phần {i} vào file: {write_err}")
-                         status_messages[-1] = f"Phần {i}/{total_parts}: Hoàn thành (Lỗi ghi file)" # Cập nhật status
-
-                    # Cập nhật thanh tiến trình và trạng thái tổng thể
-                    self.progress_bar["value"] = i
-                    self.queue.put((self.completion_text, "\n".join(status_messages) + f"\nKết quả đang lưu tại: {result_file}", True))
-
-                    # Delay giữa các phần thành công (nếu cần và không bị dừng)
-                    if i < total_parts and not self.should_stop:
-                        # Có thể bỏ delay hoặc giảm bớt nếu API cho phép tần suất cao hơn
-                        # time.sleep(5) # Giảm delay ví dụ còn 5 giây
-                        pass # Bỏ delay nếu không cần
-
-            # Kết thúc vòng lặp (hoàn thành hoặc bị dừng)
             final_status = "\n".join(status_messages)
             if not self.should_stop:
                 final_status = "Hoàn thành xử lý tất cả các phần.\n" + final_status
                 self.queue.put((self.progress_text, "Đã xử lý xong!", True))
             else:
-                 final_status = "Xử lý bị dừng.\n" + final_status
-
+                final_status = "Xử lý bị dừng.\n" + final_status
             self.queue.put((self.completion_text, final_status + f"\nKết quả đầy đủ (hoặc chưa hoàn chỉnh) lưu tại: {result_file}", True))
 
         except FileNotFoundError as e:
-             self.show_error(f"Lỗi đường dẫn hoặc file: {str(e)}")
+            self.show_error(f"Lỗi đường dẫn hoặc file: {str(e)}")
         except Exception as e:
-            # Bắt các lỗi không mong muốn khác trong quá trình xử lý chính
-            error_traceback = traceback.format_exc() # Lấy traceback chi tiết
+            error_traceback = traceback.format_exc()
             print(f"Lỗi nghiêm trọng trong _process_request_thread: {error_traceback}")
             self.show_error(f"Lỗi không xác định trong quá trình xử lý: {str(e)}")
             self.queue.put((self.completion_text, f"Đã xảy ra lỗi nghiêm trọng: {str(e)}", True))
-
         finally:
-            # Đảm bảo trạng thái được reset và nút được kích hoạt lại
             self.processing = False
-            # Sử dụng root.after(0, ...) để đảm bảo chúng chạy trên main thread
             self.root.after(0, lambda: self.submit_button.configure(state='normal'))
             self.root.after(0, lambda: self.stop_button.configure(state='disabled'))
-            print("Processing thread finished.") # Log kết thúc thread
+            print("Processing thread finished.")
 
     def split_text(self, text):
         try:
